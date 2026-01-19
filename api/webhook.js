@@ -1,5 +1,5 @@
 // api/webhook.js (CommonJS)
-const { Bot, InlineKeyboard } = require("grammy");
+const { Bot, InlineKeyboard, InputFile } = require("grammy");
 const { fetch } = require("undici");
 
 const { getJSON, setJSON, saveInvoice, listInvoices } = require("../lib/redis");
@@ -30,6 +30,8 @@ function awaitKey(chatId) {
 function mainKb() {
   return new InlineKeyboard()
     .text("✅ PDF", "pdf")
+    .row()
+    .text("➕ Позиция", "add")
     .row()
     .text("✏️ Имя", "rename")
     .text("🔢 Кол-во", "qty")
@@ -102,11 +104,18 @@ bot.callbackQuery("pdf", async (ctx) => {
   if (!inv) return ctx.answerCallbackQuery({ text: "Накладная не найдена" });
 
   const pdfBytes = await buildPdf(inv);
-  await ctx.replyWithDocument(new Blob([pdfBytes], { type: "application/pdf" }), {
-    filename: `nakladnaya_${inv.invoiceId}.pdf`
-  });
+  const filename = `nakladnaya_${inv.invoiceId}.pdf`;
 
+  await ctx.replyWithDocument(new InputFile(Buffer.from(pdfBytes), filename));
   return ctx.answerCallbackQuery();
+});
+
+bot.callbackQuery("add", async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await setJSON(awaitKey(ctx.chat.id), { type: "add_value" });
+  return ctx.reply(
+    "Введи новую позицию в формате:\nНазвание, кол-во, цена\nПример: Антигель Mannol 1л, 50, 2600"
+  );
 });
 
 bot.callbackQuery("rename", async (ctx) => {
@@ -137,7 +146,7 @@ bot.callbackQuery("eta", async (ctx) => {
   );
 });
 
-// ---- Text handler (редактирование + “добавь доставку 5000”)
+// ---- Text handler
 bot.on("message:text", async (ctx) => {
   const chatId = ctx.chat.id;
 
@@ -157,6 +166,19 @@ bot.on("message:text", async (ctx) => {
   };
 
   if (awaiting) {
+    if (awaiting.type === "add_value") {
+      const parts = t.split(",").map((x) => x.trim());
+      if (parts.length < 3) return ctx.reply("Формат: Название, кол-во, цена");
+      const name = parts[0];
+      const qty = Number(parts[1].replace(/[^\d]/g, "")) || 0;
+      const price = Number(parts[2].replace(/[^\d]/g, "")) || 0;
+      inv.items.push({ name, qty, unit_price: price, sum: 0 });
+      calc(inv);
+      await setJSON(invKey(chatId, inv.invoiceId), inv);
+      await setJSON(awaitKey(chatId), null);
+      return ctx.reply(formatInvoice(inv), { reply_markup: mainKb() });
+    }
+
     if (awaiting.type === "rename_choose") {
       const idx = chooseIndex(t);
       if (idx === null) return ctx.reply("Неверный номер позиции.");
@@ -237,10 +259,10 @@ bot.on("message:text", async (ctx) => {
       });
 
       const kb = new InlineKeyboard().url("📅 Добавить в Google Calendar", link);
-      await ctx.reply(
-        "Готово. Нажми кнопку — откроется Google Calendar с заполненным событием.",
-        { reply_markup: kb }
-      );
+      await ctx.reply("Готово. Нажми кнопку — откроется Google Calendar с заполненным событием.", {
+        reply_markup: kb
+      });
+
       return ctx.reply(formatInvoice(inv), { reply_markup: mainKb() });
     }
 
@@ -257,21 +279,17 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-// ---- Vercel handler (инициализация + корректно читаем body)
+// ---- Vercel handler (init + надёжный body)
 module.exports = async (req, res) => {
   try {
     const update = await readTelegramUpdate(req);
 
-    // Важно для serverless: bot.handleUpdate требует bot.init() [web:190]
-    if (!bot.isInited()) {
-      await bot.init();
-    }
+    if (!bot.isInited()) await bot.init();
 
     await bot.handleUpdate(update);
     return res.status(200).send("ok");
   } catch (e) {
     console.error("WEBHOOK_ERROR:", e);
-    // Telegram ретраит если не 200 → всегда возвращаем 200
     return res.status(200).send("ok");
   }
 };
