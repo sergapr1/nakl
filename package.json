@@ -1,0 +1,11 @@
+{
+  "name": "tg-invoice-bot",
+  "version": "1.0.0",
+  "type": "commonjs",
+  "dependencies": {
+    "grammy": "^1.21.1",
+    "@upstash/redis": "^1.35.3",
+    "pdf-lib": "^1.17.1",
+    "undici": "^6.0.0"
+  }
+}
