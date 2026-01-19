@@ -257,15 +257,21 @@ bot.on("message:text", async (ctx) => {
   }
 });
 
-// ---- Vercel handler (самое важное: корректно читаем body)
+// ---- Vercel handler (инициализация + корректно читаем body)
 module.exports = async (req, res) => {
   try {
     const update = await readTelegramUpdate(req);
+
+    // Важно для serverless: bot.handleUpdate требует bot.init() [web:190]
+    if (!bot.isInited()) {
+      await bot.init();
+    }
+
     await bot.handleUpdate(update);
     return res.status(200).send("ok");
   } catch (e) {
     console.error("WEBHOOK_ERROR:", e);
-    // Telegram ретраит если не 200, поэтому отдаём 200 даже при ошибке
+    // Telegram ретраит если не 200 → всегда возвращаем 200
     return res.status(200).send("ok");
   }
 };
