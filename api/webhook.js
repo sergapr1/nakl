@@ -1,13 +1,21 @@
+// api/webhook.js (CommonJS)
 const { Bot, InlineKeyboard } = require("grammy");
 const { fetch } = require("undici");
 
 const { getJSON, setJSON, saveInvoice, listInvoices } = require("../lib/redis");
 const { transcribeOggWithGroq } = require("../lib/transcribe");
-const { extractInvoiceFromText, formatInvoice, parseEta, applyDeliveryCommand, calc } = require("../lib/invoice");
+const {
+  extractInvoiceFromText,
+  formatInvoice,
+  parseEta,
+  applyDeliveryCommand,
+  calc
+} = require("../lib/invoice");
 const { buildPdf } = require("../lib/pdf");
 const { makeGCalLink } = require("../lib/gcal");
 
-const bot = new Bot(process.env.TG_TOKEN);
+const TG_TOKEN = process.env.TG_TOKEN;
+const bot = new Bot(TG_TOKEN);
 
 function invKey(chatId, invoiceId) {
   return `inv:${chatId}:${invoiceId}`;
@@ -21,14 +29,20 @@ function awaitKey(chatId) {
 
 function mainKb() {
   return new InlineKeyboard()
-    .text("✅ PDF", "pdf").row()
-    .text("✏️ Имя", "rename").text("🔢 Кол-во", "qty").text("💵 Цена", "price").row()
-    .text("🗑 Удалить", "del").row()
+    .text("✅ PDF", "pdf")
+    .row()
+    .text("✏️ Имя", "rename")
+    .text("🔢 Кол-во", "qty")
+    .text("💵 Цена", "price")
+    .row()
+    .text("🗑 Удалить", "del")
+    .row()
     .text("📅 Доставка в Calendar", "eta");
 }
 
+// ---- Commands
 bot.command("start", (ctx) => {
-  ctx.reply(
+  return ctx.reply(
     "Кидай голосовое с позициями.\nКоманды:\n/history\n/search <текст>\n/open <id>"
   );
 });
@@ -36,7 +50,9 @@ bot.command("start", (ctx) => {
 bot.command("history", async (ctx) => {
   const list = await listInvoices(ctx.chat.id, 20);
   if (!list.length) return ctx.reply("История пустая.");
-  const txt = list.map(x => `${x.invoiceId} | ${x.date} | ${x.total} тг | ${x.supplier || "—"}`).join("\n");
+  const txt = list
+    .map((x) => `${x.invoiceId} | ${x.date} | ${x.total} тг | ${x.supplier || "—"}`)
+    .join("\n");
   return ctx.reply(txt);
 });
 
@@ -44,9 +60,13 @@ bot.command("search", async (ctx) => {
   const q = (ctx.match || "").trim().toLowerCase();
   if (!q) return ctx.reply("Пример: /search антигель");
   const list = await listInvoices(ctx.chat.id, 200);
-  const hit = list.filter(inv => inv.items.some(it => (it.name || "").toLowerCase().includes(q)));
+  const hit = list.filter((inv) =>
+    inv.items.some((it) => (it.name || "").toLowerCase().includes(q))
+  );
   if (!hit.length) return ctx.reply("Ничего не найдено.");
-  return ctx.reply(hit.slice(0, 30).map(x => `${x.invoiceId} | ${x.date} | ${x.total} тг`).join("\n"));
+  return ctx.reply(
+    hit.slice(0, 30).map((x) => `${x.invoiceId} | ${x.date} | ${x.total} тг`).join("\n")
+  );
 });
 
 bot.command("open", async (ctx) => {
@@ -58,9 +78,10 @@ bot.command("open", async (ctx) => {
   return ctx.reply(formatInvoice(inv), { reply_markup: mainKb() });
 });
 
+// ---- Voice -> invoice
 bot.on("message:voice", async (ctx) => {
   const file = await ctx.getFile();
-  const fileUrl = `https://api.telegram.org/file/bot${process.env.TG_TOKEN}/${file.file_path}`;
+  const fileUrl = `https://api.telegram.org/file/bot${TG_TOKEN}/${file.file_path}`;
   const audioBuf = Buffer.from(await (await fetch(fileUrl)).arrayBuffer());
 
   const text = await transcribeOggWithGroq(audioBuf);
@@ -69,9 +90,10 @@ bot.on("message:voice", async (ctx) => {
   await saveInvoice(ctx.chat.id, inv);
   await setJSON(activeKey(ctx.chat.id), inv.invoiceId);
 
-  await ctx.reply(formatInvoice(inv), { reply_markup: mainKb() });
+  return ctx.reply(formatInvoice(inv), { reply_markup: mainKb() });
 });
 
+// ---- Inline actions
 bot.callbackQuery("pdf", async (ctx) => {
   const active = await getJSON(activeKey(ctx.chat.id));
   if (!active) return ctx.answerCallbackQuery({ text: "Нет активной накладной" });
@@ -107,34 +129,34 @@ bot.callbackQuery("del", async (ctx) => {
   await setJSON(awaitKey(ctx.chat.id), { type: "del_choose" });
   return ctx.reply("Номер позиции для удаления? (например: 1)");
 });
-
 bot.callbackQuery("eta", async (ctx) => {
   await ctx.answerCallbackQuery();
   await setJSON(awaitKey(ctx.chat.id), { type: "eta" });
-  return ctx.reply("Когда ожидается доставка?\nФормат: 2026-01-20 15:30 или 20.01 15:30 (Алматы).");
+  return ctx.reply(
+    "Когда ожидается доставка?\nФормат: 2026-01-20 15:30 или 20.01 15:30 (Алматы)."
+  );
 });
 
+// ---- Text handler (редактирование + “добавь доставку 5000”)
 bot.on("message:text", async (ctx) => {
   const chatId = ctx.chat.id;
 
   const active = await getJSON(activeKey(chatId));
-  if (!active) return; // нет активной накладной — игнорируем текст
+  if (!active) return;
 
   const inv = await getJSON(invKey(chatId, active));
   if (!inv) return;
 
-  // 1) если ждём ввод после кнопок
   const awaiting = await getJSON(awaitKey(chatId));
+  const t = ctx.message.text.trim();
+
+  const chooseIndex = (s) => {
+    const n = Number(s.trim()) - 1;
+    if (Number.isNaN(n) || n < 0 || n >= inv.items.length) return null;
+    return n;
+  };
+
   if (awaiting) {
-    const t = ctx.message.text.trim();
-
-    // выбор позиции (номер)
-    const chooseIndex = (s) => {
-      const n = Number(s.trim()) - 1;
-      if (Number.isNaN(n) || n < 0 || n >= inv.items.length) return null;
-      return n;
-    };
-
     if (awaiting.type === "rename_choose") {
       const idx = chooseIndex(t);
       if (idx === null) return ctx.reply("Неверный номер позиции.");
@@ -176,7 +198,7 @@ bot.on("message:text", async (ctx) => {
 
     if (awaiting.type === "qty_value") {
       const val = Number(t.replace(/[^\d]/g, ""));
-      if (!val && val !== 0) return ctx.reply("Не понял число.");
+      if (!Number.isFinite(val)) return ctx.reply("Не понял число.");
       inv.items[awaiting.idx].qty = val;
       calc(inv);
       await setJSON(invKey(chatId, inv.invoiceId), inv);
@@ -186,7 +208,7 @@ bot.on("message:text", async (ctx) => {
 
     if (awaiting.type === "price_value") {
       const val = Number(t.replace(/[^\d]/g, ""));
-      if (!val && val !== 0) return ctx.reply("Не понял число.");
+      if (!Number.isFinite(val)) return ctx.reply("Не понял число.");
       inv.items[awaiting.idx].unit_price = val;
       calc(inv);
       await setJSON(invKey(chatId, inv.invoiceId), inv);
@@ -196,7 +218,9 @@ bot.on("message:text", async (ctx) => {
 
     if (awaiting.type === "eta") {
       const dt = parseEta(t);
-      if (!dt) return ctx.reply("Не понял формат. Пример: 2026-01-20 15:30 или 20.01 15:30");
+      if (!dt) {
+        return ctx.reply("Не понял формат. Пример: 2026-01-20 15:30 или 20.01 15:30");
+      }
 
       inv.etaText = t;
       await setJSON(invKey(chatId, inv.invoiceId), inv);
@@ -213,21 +237,46 @@ bot.on("message:text", async (ctx) => {
       });
 
       const kb = new InlineKeyboard().url("📅 Добавить в Google Calendar", link);
-      await ctx.reply("Готово. Нажми кнопку — откроется Google Calendar с заполненным событием.", { reply_markup: kb });
+      await ctx.reply(
+        "Готово. Нажми кнопку — откроется Google Calendar с заполненным событием.",
+        { reply_markup: kb }
+      );
       return ctx.reply(formatInvoice(inv), { reply_markup: mainKb() });
     }
+
+    return;
   }
 
-  // 2) произвольная команда: “добавь доставку 5000”
-  const { changed, inv: inv2 } = applyDeliveryCommand(inv, ctx.message.text);
+  // Произвольная команда (MVP): доставка
+  const { changed, inv: inv2 } = applyDeliveryCommand(inv, t);
   if (changed) {
     await setJSON(invKey(chatId, inv2.invoiceId), inv2);
-    return ctx.reply("Ок, обновил доставку.\n\n" + formatInvoice(inv2), { reply_markup: mainKb() });
+    return ctx.reply("Ок, обновил доставку.\n\n" + formatInvoice(inv2), {
+      reply_markup: mainKb()
+    });
   }
 });
 
+// ---- Vercel handler (самое важное: корректно читаем body)
 module.exports = async (req, res) => {
-  // Telegram присылает update в JSON по webhook [web:87]
-  await bot.handleUpdate(req.body);
-  res.status(200).send("ok");
+  try {
+    const update = await readTelegramUpdate(req);
+    await bot.handleUpdate(update);
+    return res.status(200).send("ok");
+  } catch (e) {
+    console.error("WEBHOOK_ERROR:", e);
+    // Telegram ретраит если не 200, поэтому отдаём 200 даже при ошибке
+    return res.status(200).send("ok");
+  }
 };
+
+async function readTelegramUpdate(req) {
+  if (req.body) {
+    if (typeof req.body === "string") return JSON.parse(req.body);
+    return req.body;
+  }
+  const chunks = [];
+  for await (const c of req) chunks.push(c);
+  const raw = Buffer.concat(chunks).toString("utf8");
+  return raw ? JSON.parse(raw) : {};
+}
